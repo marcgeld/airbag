@@ -111,7 +111,6 @@ temp/
 *.qcow2
 # Swift build artifacts
 .swiftpm/
-Packages/
 # Xcode build artifacts and user files
 DerivedData/
 *.pbxuser
@@ -123,3 +122,9 @@ DerivedData/
 .xcworkspace/
 # Chrome/Edge cache files
 .chrome
+
+# Airbag invalid-policy test build
+.build-invalid/
+
+# Release archives
+dist/

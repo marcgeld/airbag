@@ -1,0 +1,170 @@
+# Adapted from marcgeld/AskAFM/.github/workflows/release.yml.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+env:
+  BINARY_NAME: airbag
+  ARCHIVE_NAME: airbag-macos-arm64.zip
+  SIGNING_IDENTITY: "Developer ID Application: Redseven AB (4MW6K9N3NR)"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: xcode-27
+    env:
+      TOOLCHAINS: com.apple.dt.toolchain.XcodeDefault
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: "27.2"
+
+      - name: Show runner info
+        run: |
+          sw_vers
+          uname -a
+          xcodebuild -version
+          /usr/bin/xcrun --toolchain XcodeDefault --sdk macosx swift --version
+          xcrun --show-sdk-path
+
+      - name: Test CLI
+        run: /usr/bin/xcrun --toolchain XcodeDefault --sdk macosx swift test
+
+      - name: Test sandbox restrictions
+        run: ./Tests/Security/test.sh
+
+      - name: Build arm64
+        run: |
+          /usr/bin/xcrun --toolchain XcodeDefault --sdk macosx swift build -c release --arch arm64
+          binary_dir=$(/usr/bin/xcrun --toolchain XcodeDefault --sdk macosx swift build -c release --arch arm64 --show-bin-path)
+          mkdir -p dist
+          cp "$binary_dir/$BINARY_NAME" "dist/$BINARY_NAME"
+          lipo -verify_arch arm64 "dist/$BINARY_NAME"
+
+      - name: Import code signing certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          : "${BUILD_CERTIFICATE_BASE64:?Missing BUILD_CERTIFICATE_BASE64 secret}"
+          : "${P12_PASSWORD:?Missing P12_PASSWORD secret}"
+          certificate="$RUNNER_TEMP/airbag-certificate.p12"
+          keychain="$RUNNER_TEMP/airbag-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          echo "::add-mask::$keychain_password"
+          # Restrict access to the imported certificate file.
+          umask 077
+          trap 'rm -f "$certificate"' EXIT
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+
+      - name: Sign and verify binary
+        run: |
+          codesign --force --timestamp --options runtime \
+            --keychain "$RUNNER_TEMP/airbag-signing.keychain-db" \
+            --sign "$SIGNING_IDENTITY" "dist/$BINARY_NAME"
+          codesign --verify --strict --verbose=2 "dist/$BINARY_NAME"
+          codesign --display --verbose=4 "dist/$BINARY_NAME"
+          # Check that the hardened, signed launcher can still activate Seatbelt.
+          "dist/$BINARY_NAME" /bin/echo 'Signed Airbag sandbox active'
+
+      - name: Archive binary
+        run: |
+          ditto -c -k --keepParent "dist/$BINARY_NAME" "dist/$ARCHIVE_NAME"
+          (cd dist && shasum -a 256 "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256")
+
+      - name: Notarize binary
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          : "${APPLE_ID:?Missing APPLE_ID secret}"
+          : "${APPLE_TEAM_ID:?Missing APPLE_TEAM_ID secret}"
+          : "${APPLE_APP_PASSWORD:?Missing APPLE_APP_PASSWORD secret}"
+          xcrun notarytool submit "dist/$ARCHIVE_NAME" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait --timeout 15m --output-format json > "$RUNNER_TEMP/airbag-notarization.json"
+          python3 - "$RUNNER_TEMP/airbag-notarization.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as report:
+              result = json.load(report)
+          print("Notarization:", result.get("id"), result.get("status"))
+          if result.get("status") != "Accepted":
+              raise SystemExit("Notarization was not accepted; release stopped.")
+          PY
+
+      - name: Upload signed archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: airbag-macos-arm64
+          path: |
+            dist/${{ env.ARCHIVE_NAME }}
+            dist/${{ env.ARCHIVE_NAME }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Remove signing materials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/airbag-certificate.p12"
+          keychain="$RUNNER_TEMP/airbag-signing.keychain-db"
+          if [ -f "$keychain" ]; then
+            security delete-keychain "$keychain"
+          fi
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed and notarized archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: airbag-macos-arm64
+          path: dist
+
+      - name: Verify archive checksum
+        working-directory: dist
+        run: sha256sum --check "$ARCHIVE_NAME.sha256"
+
+      - name: Create release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/${{ env.ARCHIVE_NAME }}
+            dist/${{ env.ARCHIVE_NAME }}.sha256
+
