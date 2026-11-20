@@ -2,19 +2,45 @@
 
 A lightweight macOS command sandbox. *Airbag doesn't prevent the journey. It softens the impact.*
 
-Requires macOS 15+, Swift 6.4, and Xcode. Use Xcode's bundled compiler to avoid SDK/toolchain mismatches.
+## Installation
+
+Requires macOS 15 (Sequoia) or later and Apple Silicon. Install the prebuilt binary with [Homebrew](https://brew.sh) from [marcgeld/tap](https://github.com/marcgeld/homebrew-tap):
+
+```bash
+brew install marcgeld/tap/airbag
+airbag --help
+```
+
+The Homebrew package does not require Swift or Xcode. To update:
+
+```bash
+brew update
+brew upgrade marcgeld/tap/airbag
+```
+
+## Usage
+
+```bash
+airbag --workspace . /bin/echo "Hello from Airbag"
+airbag --network=all /bin/bash --noprofile --norc
+airbag --workspace ./project /bin/bash --noprofile --norc
+airbag --workspace ./project --init-project-config
+```
+
+Arguments after the command are passed through unchanged.
+
+`--network=all` allows all network traffic for one command, overriding global and project settings without saving changes. Other network values (domains and CIDR ranges) are not supported. Filesystem and IPC restrictions still apply. Place Airbag options before the command.
+
+## Build from source
+
+Requires macOS 15+, Swift 6.4, and Xcode. Use Xcode's bundled compiler to avoid SDK/toolchain mismatches. From the repository directory:
 
 ```bash
 xcrun --toolchain XcodeDefault --sdk macosx swift build
 .build/debug/airbag --help
-.build/debug/airbag --network=all /bin/bash --noprofile --norc
-.build/debug/airbag --workspace ./project /bin/bash --noprofile --norc
-.build/debug/airbag --workspace ./project --init-project-config
 ```
 
-Arguments after the command are passed through unchanged. Add `-c release` to build an optimized binary in `.build/release/airbag`.
-
-`--network=all` allows all network traffic for one command, overriding global and project settings without saving changes. Other network values (domains and CIDR ranges) are not supported. Filesystem and IPC restrictions still apply. Place Airbag options before the command.
+Add `-c release` to build an optimized binary in `.build/release/airbag`.
 
 ## Configuration
 
